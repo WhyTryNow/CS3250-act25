@@ -1,2 +1,4 @@
-openai>=1.40
-requests>=2.31
+Flask
+Flask-SQLAlchemy
+Werkzeug
+pytest
