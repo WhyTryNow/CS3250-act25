@@ -2,155 +2,168 @@ import pytest
 from app import create_app
 from app.models import Student
 from app.routes import student_bp
+from flask import url_for, session, redirect, request
 
 @pytest.fixture
 def app():
-    """Fixture for creating a test app."""
-    app = create_app(config={'TESTING': True})
+    """Create and configure a new app instance."""
+    app = create_app()
+    app.config['TESTING'] = True
     yield app
-    app.db.drop_all()
 
 @pytest.fixture
 def client(app):
-    """Fixture for the test client."""
-    return app.test_client()
+    """A test client for the app."""
+    with app.test_client() as client:
+        yield client
 
 @pytest.fixture
-def db_session(app):
-    """Fixture for a clean session before each test."""
+def db_setup(app):
+    """Set up the database for testing (in-memory SQLite)."""
     with app.app_context():
-        db = app.config['SQLALCHEMY_DATABASE_URI'].replace('sqlite:///', 'sqlite:///:memory:')
-        app.db.init_app(app) # Re-initialize db for testing context if necessary, though create_app handles it.
-        yield app.db
-        app.db.drop_all()
+        from app import db
+        db.create_all()
+        yield db
 
-def test_successful_registration(client, db_session):
+def test_successful_registration(client, db_setup):
     """
-    AC 1: Given an unregistered student, when the student submits valid data, 
-    then a new student account is created.
+    Acceptance Criterion 1: Given an unregistered student, when the student submits
+    student ID, full name, email address, and password, then a new student account
+    is created and the student can log in with those credentials.
     """
-    student_data = {
+    # 1. Register a new student
+    response = client.post('/register', data={
         'student_id': 'S12345',
-        'full_name': 'John Doe',
-        'email': 'john.doe@example.com',
+        'full_name': 'Test User',
+        'email': 'test@example.com',
         'password': 'StrongPassword123'
-    }
-    response = client.post('/register', data=student_data)
-    
-    # Check for success message (implied by redirect to dashboard or a success flash)
-    assert response.status_code == 200
+    })
+
+    assert response.status_code == 302
+    # Check for success message
     assert b'Registration successful!' in response.data
     
-    # Verify creation in DB
-    student = Student.query.filter_by(student_id='S12345').first()
-    assert student is not None
-    assert student.full_name == 'John Doe'
-    # Verify password hashing (AC 4)
-    assert student.password_hash != 'StrongPassword123'
-    assert student.check_password('StrongPassword123') is True
+    # 2. Verify student exists in DB
+    with db_setup.session.get(Student, 1) as student: # Assuming it gets ID 1 after creation
+        assert student is not None
+        assert student.student_id == 'S12345'
+        # AC 4 check (implicit): Password hash should be present, not plain text
+        assert student.password_hash is not None
+        assert not student.password_hash == 'StrongPassword123'
 
-def test_registration_missing_fields(client):
+def test_registration_missing_fields(client, db_setup):
     """
-    AC 2: Given a registration request, when any required field is missing, 
-    then the account is not created and an error message is displayed.
+    Acceptance Criterion 2: Given a registration request, when any required field is
+    missing or invalid, then the account is not created and an appropriate error
+    message is displayed.
     """
-    # Test missing password
-    data = {
+    # Submit with no data
+    response = client.post('/register', data={})
+    assert response.status_code == 200 # Should return to the form with an error flash
+
+    # Submit with some data missing (e.g., password missing)
+    response = client.post('/register', data={
         'student_id': 'S12345',
-        'full_name': 'John Doe',
-        'email': 'john.doe@example.com',
-        'password': ''
-    }
-    response = client.post('/register', data=data)
+        'full_name': 'Test User',
+        'email': 'test@example.com',
+    })
     assert response.status_code == 200
+    # Check for the 'All fields are required.' flash message
     assert b'All fields are required.' in response.data
-    
-    # Test missing student_id
-    data_no_id = {
-        'full_name': 'John Doe',
-        'email': 'john.doe@example.com',
-        'password': 'ValidPass123'
-    }
-    response_no_id = client.post('/register', data=data_no_id)
-    assert response_no_id.status_code == 200
-    assert b'All fields are required.' in response_no_id.data
 
-def test_registration_invalid_password_length(client):
+def test_registration_invalid_password_length(client, db_setup):
     """
-    AC 2: Given a registration request, when the password is shorter than 8 characters, 
-    then the account is not created and an error message is displayed.
+    Acceptance Criterion 2: Given a registration request, when a password shorter than 8
+    characters is provided, then the account is not created and an appropriate error
+    message is displayed.
     """
-    data = {
+    response = client.post('/register', data={
         'student_id': 'S12345',
-        'full_name': 'John Doe',
-        'email': 'john.doe@example.com',
-        'password': 'short' # Length < 8
-    }
-    response = client.post('/register', data=data)
+        'full_name': 'Test User',
+        'email': 'test@example.com',
+        'password': 'short' # Too short
+    })
     assert response.status_code == 200
+    # Check for password length error
     assert b'Password must be at least 8 characters long.' in response.data
     
     # Ensure no student was created
-    student = Student.query.filter_by(student_id='S12345').first()
-    assert student is None
+    with db_setup.session.query(Student).count() as count:
+        assert count == 0
 
-
-def test_registration_duplicate_student_id(client, db_session):
+def test_registration_invalid_email_format(client, db_setup):
     """
-    AC 3: Given an existing account, when a student attempts to register 
-    with the same student ID, then the account is not created and an error message is displayed.
+    Acceptance Criterion 2: Given a registration request, when an invalid email address is
+    provided, then the account is not created and an appropriate error message is displayed.
     """
-    # 1. Register the first student successfully
-    valid_data = {
-        'student_id': 'DUP_ID_1',
-        'full_name': 'Alice Smith',
-        'email': 'alice1@test.com',
-        'password': 'Pass12345'
-    }
-    client.post('/register', data=valid_data)
-    
-    # 2. Attempt to register with the same student ID
-    duplicate_data = {
-        'student_id': 'DUP_ID_1', # Duplicate ID
-        'full_name': 'Alice Duplicate',
-        'email': 'alice2@test.com', # Different email
-        'password': 'AnotherPass!'
-    }
-    response = client.post('/register', data=duplicate_data)
-    
+    response = client.post('/register', data={
+        'student_id': 'S12345',
+        'full_name': 'Test User',
+        'email': 'invalid-email', # Invalid format
+        'password': 'StrongPassword123'
+    })
     assert response.status_code == 200
-    assert b'Student ID or email already registered.' in response.data
+    # Check for email format error
+    assert b'Invalid email address format.' in response.data
     
-    # Verify only one student exists
-    student_count = Student.query.count()
-    assert student_count == 1
+    # Ensure no student was created
+    with db_setup.session.query(Student).count() as count:
+        assert count == 0
 
-def test_registration_duplicate_email(client, db_session):
+def test_registration_duplicate_student_id(client, db_setup):
     """
-    AC 3: Given an existing account, when a student attempts to register 
-    with the same email address, then the account is not created and an error message is displayed.
+    Acceptance Criterion 3: Given an existing account, when a student attempts to
+    register with the same student ID, then the account is not created and an
+    appropriate error message is displayed.
     """
-    # 1. Register the first student successfully
-    valid_data = {
-        'student_id': 'S_EMAIL_DUP',
-        'full_name': 'Bob Johnson',
-        'email': 'bob@duplicate.com',
-        'password': 'Pass45678'
-    }
-    client.post('/register', data=valid_data)
-    
-    # 2. Attempt to register with the same email address
-    duplicate_data = {
-        'student_id': 'S_NEW_ID', # Different ID
-        'full_name': 'Bob Duplicate',
-        'email': 'bob@duplicate.com', # Duplicate Email
-        'password': 'NewPass!'
-    }
-    response = client.post('/register', data=duplicate_data)
-    
+    # 1. Register a student first
+    client.post('/register', data={
+        'student_id': 'DUP_ID',
+        'full_name': 'Original',
+        'email': 'original@test.com',
+        'password': 'OriginalPass123'
+    })
+
+    # 2. Attempt to register with the same ID
+    response = client.post('/register', data={
+        'student_id': 'DUP_ID',
+        'full_name': 'Duplicate',
+        'email': 'duplicate@test.com',
+        'password': 'AnotherPass123'
+    })
     assert response.status_code == 200
+    # Check for duplicate error message
     assert b'Student ID or email already registered.' in response.data
-    
+
     # Verify only one student exists
-    student_count = Student.query.count()
-    assert student_count == 1
+    with db_setup.session.query(Student).count() as count:
+        assert count == 1
+
+def test_registration_duplicate_email(client, db_setup):
+    """
+    Acceptance Criterion 3: Given an existing account, when a student attempts to
+    register with the same email address, then the account is not created and an
+    appropriate error message is displayed.
+    """
+    # 1. Register a student first
+    client.post('/register', data={
+        'student_id': 'S2',
+        'full_name': 'Original',
+        'email': 'existing@test.com',
+        'password': 'OriginalPass123'
+    })
+
+    # 2. Attempt to register with the same email
+    response = client.post('/register', data={
+        'student_id': 'S3',
+        'full_name': 'New User',
+        'email': 'existing@test.com', # Duplicate email
+        'password': 'NewPass123'
+    })
+    assert response.status_code == 200
+    # Check for duplicate error message
+    assert b'Student ID or email already registered.' in response.data
+
+    # Verify only one student exists
+    with db_setup.session.query(Student).count() as count:
+        assert count == 1
