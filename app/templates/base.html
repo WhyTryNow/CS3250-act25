@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Academic Records</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <header class="site-header">
+        <div class="container">
+            <div class="brand">Academic Portal</div>
+            <nav class="site-nav">
+                <a href="{{ url_for('main.index') }}">My Courses</a>
+                <a href="{{ url_for('main.login') }}">Login</a>
+                {% if session.get('user_id') %}
+                    <span>Welcome, User {{ session['user_id'] }}</span>
+                    <a href="{{ url_for('main.logout') }}" class="btn btn-secondary btn-small">Logout</a>
+                {% else %}
+                    <a href="{{ url_for('main.login') }}">Login</a>
+                {% endif %}
+            </nav>
+        </div>
+    </header>
+
+    <main>
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                <ul class="flashes">
+                {% for category, message in messages %}
+                    <li class="flash {{ category }}">{{ message }}</li>
+                {% endfor %}
+                </ul>
+            {% endif %}
+        {% endwith %}
+
+        {% block content %}{% endblock %}
+    </main>
+</body>
+</html>
